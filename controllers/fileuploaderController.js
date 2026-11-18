@@ -62,7 +62,7 @@ const extractLocalKeywords = (cleanText) => {
     if (!cleanText) return [];
     const words = cleanText
         .toLowerCase()
-        .replace(/[^a-z0-9\s-]/gi, '')
+        .replace(/[^a-zа-яё0-9\s-]/gi, '')
         .split(/\s+/)
         .filter((w) => w.length > 3 && w.length < 24);
 
@@ -109,24 +109,29 @@ const analyzeDocument = async (filePath, mimeType, extractedText, originalName) 
     let keywords = extractLocalKeywords(extractedText);
     let keyFindings = [];
     let aiAnalyzed = false;
+    let aiError = '';
     let finalText = extractedText;
 
-    if (process.env.GEMINI_API_KEY) {
+    const apiKey = (process.env.GEMINI_API_KEY || '').trim();
+
+    if (!apiKey) {
+        aiError = 'GEMINI_API_KEY is empty in server .env file';
+    } else {
         try {
             const { GoogleGenAI } = require('@google/genai');
-            const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+            const ai = new GoogleGenAI({ apiKey });
 
-            const instruction = `You are a precise document analysis engine. Analyze the provided document and return ONLY valid JSON with these exact keys:
+            const instruction = `You are a professional document analysis engine. Analyze the provided document (even if the source text is in Russian or another language, write ALL output fields strictly in English). Return ONLY valid JSON with these exact keys:
 {
-  "summary": "Clear 2-3 sentence executive summary in English describing what this document is about and its main conclusions",
+  "summary": "2-3 sentence executive summary in English explaining the document purpose, role/subject, and main conclusions",
   "category": "Choose strictly one: Legal / Contract, Financial Report, Academic / Research, Technical Documentation, General Document",
-  "keywords": ["5 to 6 concise single-word or two-word topic tags in lowercase"],
-  "keyFindings": ["3 specific factual points or key details extracted from the content"],
+  "keywords": ["5 to 6 concise English topic tags in lowercase"],
+  "keyFindings": ["3 specific factual takeaways in English extracted from the document"],
   "ocrText": "If input is an image without extracted text, transcribe the visible text; otherwise leave empty string"
 }`;
 
             let contentsPayload;
-            if (mimeType.startsWith('image/')) {
+            if (mimeType && mimeType.startsWith('image/')) {
                 const imgBase64 = fs.readFileSync(path.resolve(filePath)).toString('base64');
                 contentsPayload = [
                     instruction,
@@ -137,8 +142,10 @@ const analyzeDocument = async (filePath, mimeType, extractedText, originalName) 
                         }
                     }
                 ];
-            } else if (extractedText && extractedText.length > 15) {
+            } else if (extractedText && extractedText.length > 10) {
                 contentsPayload = `${instruction}\n\nFilename: ${originalName}\nDocument content:\n${extractedText.slice(0, 8000)}`;
+            } else {
+                aiError = 'No readable text extracted from file to send to AI';
             }
 
             if (contentsPayload) {
@@ -151,7 +158,12 @@ const analyzeDocument = async (filePath, mimeType, extractedText, originalName) 
                 });
 
                 if (response && response.text) {
-                    const parsed = JSON.parse(response.text.trim());
+                    const cleanJson = response.text
+                        .replace(/^```json\s*/i, '')
+                        .replace(/^```\s*/i, '')
+                        .replace(/```\s*$/i, '')
+                        .trim();
+                    const parsed = JSON.parse(cleanJson);
                     if (parsed.summary) summary = parsed.summary;
                     if (parsed.category) category = parsed.category;
                     if (Array.isArray(parsed.keywords) && parsed.keywords.length > 0) {
@@ -164,10 +176,14 @@ const analyzeDocument = async (filePath, mimeType, extractedText, originalName) 
                         finalText = parsed.ocrText;
                     }
                     aiAnalyzed = true;
+                    aiError = '';
+                } else {
+                    aiError = 'Empty response returned from Gemini API';
                 }
             }
         } catch (aiErr) {
-            console.error('Gemini API error:', aiErr.message);
+            aiError = aiErr.message || 'Unknown Gemini API error';
+            console.error('Gemini API error:', aiError);
         }
     }
 
@@ -178,6 +194,7 @@ const analyzeDocument = async (filePath, mimeType, extractedText, originalName) 
         wordCount: finalText ? finalText.split(/\s+/).filter(Boolean).length : wordCount,
         category,
         aiAnalyzed,
+        aiError,
         extractedText: finalText
     };
 };
@@ -210,10 +227,44 @@ const singleFileUpload = async (req, res) => {
             keywords: analysis.keywords,
             wordCount: analysis.wordCount,
             category: analysis.category,
-            aiAnalyzed: analysis.aiAnalyzed
+            aiAnalyzed: analysis.aiAnalyzed,
+            aiError: analysis.aiError
         });
         await file.save();
         res.status(201).send(file);
+    } catch (error) {
+        res.status(400).send(error.message);
+    }
+};
+
+const reanalyzeSingleFile = async (req, res) => {
+    try {
+        const file = await SingleFile.findById(req.params.id);
+        if (!file) {
+            return res.status(404).send('Document not found');
+        }
+        let rawText = file.extractedText;
+        if (!rawText || rawText.length < 15) {
+            rawText = await extractDocumentContent(file.filePath, file.fileType, file.fileName);
+        }
+        const analysis = await analyzeDocument(
+            file.filePath,
+            file.fileType,
+            rawText,
+            file.fileName
+        );
+
+        file.extractedText = (analysis.extractedText || '').slice(0, 15000);
+        file.summary = analysis.summary;
+        file.keyFindings = analysis.keyFindings;
+        file.keywords = analysis.keywords;
+        file.wordCount = analysis.wordCount;
+        file.category = analysis.category;
+        file.aiAnalyzed = analysis.aiAnalyzed;
+        file.aiError = analysis.aiError;
+
+        await file.save();
+        res.status(200).send(file);
     } catch (error) {
         res.status(400).send(error.message);
     }
@@ -252,7 +303,8 @@ const multipleFileUpload = async (req, res) => {
                 keywords: analysis.keywords,
                 wordCount: analysis.wordCount,
                 category: analysis.category,
-                aiAnalyzed: analysis.aiAnalyzed
+                aiAnalyzed: analysis.aiAnalyzed,
+                aiError: analysis.aiError
             });
         }
 
@@ -305,6 +357,7 @@ const deleteSingleFile = async (req, res) => {
 
 module.exports = {
     singleFileUpload,
+    reanalyzeSingleFile,
     multipleFileUpload,
     getallSingleFiles,
     getallMultipleFiles,

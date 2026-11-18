@@ -46,6 +46,10 @@ const singleFileSchema = new Schema({
     aiAnalyzed: {
         type: Boolean,
         default: false
+    },
+    aiError: {
+        type: String,
+        default: ''
     }
 }, { timestamps: true });
 
