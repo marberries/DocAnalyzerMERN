@@ -88,10 +88,13 @@ const extractLocalKeywords = (cleanText) => {
 };
 
 const callGeminiWithAutoFallback = async (ai, apiKey, contentsPayload) => {
-    const primaryModels = ['gemini-3.8-flash', 'gemini-3.0-flash', 'gemini-2.0-flash'];
+    const primaryModels = ['gemini-3.8-flash', 'gemini-3.0-flash', 'gemini-2.5-flash-lite', 'gemini-2.0-flash'];
+    const tried = new Set();
     let lastError = null;
 
-    for (const modelName of primaryModels) {
+    const tryModel = async (modelName) => {
+        if (!modelName || tried.has(modelName)) return null;
+        tried.add(modelName);
         try {
             const response = await ai.models.generateContent({
                 model: modelName,
@@ -104,10 +107,27 @@ const callGeminiWithAutoFallback = async (ai, apiKey, contentsPayload) => {
             }
         } catch (err) {
             lastError = err;
+            try {
+                const plainResponse = await ai.models.generateContent({
+                    model: modelName,
+                    contents: contentsPayload
+                });
+                if (plainResponse && plainResponse.text) {
+                    console.log(`Gemini analysis (plain JSON) succeeded with model: ${modelName}`);
+                    return plainResponse.text;
+                }
+            } catch (plainErr) {
+                lastError = plainErr;
+            }
         }
+        return null;
+    };
+
+    for (const modelName of primaryModels) {
+        const resText = await tryModel(modelName);
+        if (resText) return resText;
     }
 
-    // Dynamic discovery of available generateContent models for this API key
     try {
         const listRes = await fetch(
             `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(apiKey)}`
@@ -122,26 +142,16 @@ const callGeminiWithAutoFallback = async (ai, apiKey, contentsPayload) => {
                         m.name &&
                         m.name.includes('gemini') &&
                         !m.name.includes('embedding') &&
-                        !m.name.includes('aqa')
+                        !m.name.includes('aqa') &&
+                        !m.name.includes('imagen') &&
+                        !m.name.includes('veo')
                 )
                 .map((m) => m.name.replace(/^models\//, ''))
                 .sort((a, b) => (b.includes('flash') ? 1 : 0) - (a.includes('flash') ? 1 : 0));
 
             for (const candidate of candidates) {
-                if (primaryModels.includes(candidate)) continue;
-                try {
-                    const response = await ai.models.generateContent({
-                        model: candidate,
-                        contents: contentsPayload,
-                        config: { responseMimeType: 'application/json' }
-                    });
-                    if (response && response.text) {
-                        console.log(`Gemini analysis succeeded with discovered model: ${candidate}`);
-                        return response.text;
-                    }
-                } catch (err) {
-                    lastError = err;
-                }
+                const resText = await tryModel(candidate);
+                if (resText) return resText;
             }
         }
     } catch (discoveryErr) {
