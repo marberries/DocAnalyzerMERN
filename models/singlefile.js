@@ -42,6 +42,10 @@ const singleFileSchema = new Schema({
     category: {
         type: String,
         default: 'General Document'
+    },
+    aiAnalyzed: {
+        type: Boolean,
+        default: false
     }
 }, { timestamps: true });
 

@@ -1,8 +1,11 @@
 const fs = require('fs');
 const path = require('path');
 const pdfParse = require('pdf-parse');
+const mammoth = require('mammoth');
 const SingleFile = require('../models/singlefile');
 const MultipleFile = require('../models/multiplefile');
+
+const DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
 
 const fileSizeFormatter = (bytes, decimal) => {
     if (bytes === 0) return '0 Bytes';
@@ -26,46 +29,49 @@ const extractDocumentContent = async (filePath, mimeType, originalName) => {
                 const parsed = await parser.getText();
                 text = parsed.text || '';
             }
+        } else if (mimeType === DOCX_MIME || originalName.toLowerCase().endsWith('.docx')) {
+            const result = await mammoth.extractRawText({ path: absolutePath });
+            text = result.value || '';
         } else if (mimeType.startsWith('text/') || mimeType === 'application/json') {
             text = fs.readFileSync(absolutePath, 'utf8');
         } else if (mimeType.startsWith('image/')) {
-            text = `Image attachment: ${originalName} (${mimeType})`;
-        } else {
-            text = `Binary document (${mimeType}): ${originalName}`;
+            text = '';
         }
     } catch (err) {
-        text = `Uploaded file: ${originalName}. Text extraction failed.`;
+        console.error('Extraction error:', err.message);
     }
     return text.replace(/\s+/g, ' ').trim();
 };
 
-const buildExtractiveFallback = (cleanText) => {
+const buildLocalSummary = (cleanText, originalName) => {
+    if (!cleanText || cleanText.length < 15) {
+        return `File "${originalName}" uploaded. No readable plain text layer detected.`;
+    }
     const sentences = cleanText
         .split(/(?<=[.!?])\s+/)
         .map((s) => s.trim())
-        .filter((s) => s.length > 35 && s.length < 320);
+        .filter((s) => s.length > 30 && s.length < 320);
 
     if (sentences.length >= 2) {
-        return sentences.slice(0, 2).join(' ');
+        return sentences.slice(0, 3).join(' ');
     }
-    return cleanText.length > 260 ? cleanText.slice(0, 260) + '...' : cleanText;
+    return cleanText.length > 320 ? cleanText.slice(0, 320) + '...' : cleanText;
 };
 
-const analyzeDocumentText = async (text, originalName) => {
-    const cleanText = text || originalName;
+const extractLocalKeywords = (cleanText) => {
+    if (!cleanText) return [];
     const words = cleanText
         .toLowerCase()
         .replace(/[^a-z0-9\s-]/gi, '')
         .split(/\s+/)
-        .filter((w) => w.length > 3);
-
-    const wordCount = words.length;
+        .filter((w) => w.length > 3 && w.length < 24);
 
     const stopWords = new Set([
         'this', 'that', 'with', 'from', 'have', 'were', 'been', 'their', 'which',
         'will', 'would', 'there', 'about', 'into', 'more', 'other', 'such', 'only',
         'also', 'than', 'then', 'them', 'these', 'some', 'could', 'what', 'when',
-        'where', 'each', 'every', 'both', 'most', 'many', 'must', 'shall', 'should'
+        'where', 'each', 'every', 'both', 'most', 'many', 'must', 'shall', 'should',
+        'document', 'file', 'page', 'using', 'based'
     ]);
 
     const freq = {};
@@ -75,67 +81,105 @@ const analyzeDocumentText = async (text, originalName) => {
         }
     });
 
-    const keywords = Object.entries(freq)
+    return Object.entries(freq)
         .sort((a, b) => b[1] - a[1])
         .slice(0, 6)
         .map((entry) => entry[0]);
+};
+
+const analyzeDocument = async (filePath, mimeType, extractedText, originalName) => {
+    const words = extractedText
+        ? extractedText.split(/\s+/).filter((w) => w.length > 0)
+        : [];
+    const wordCount = words.length;
 
     let category = 'General Document';
-    const lower = cleanText.toLowerCase();
+    const lower = (extractedText + ' ' + originalName).toLowerCase();
     if (lower.includes('contract') || lower.includes('agreement') || lower.includes('clause') || lower.includes('legal')) {
         category = 'Legal / Contract';
     } else if (lower.includes('invoice') || lower.includes('payment') || lower.includes('budget') || lower.includes('financial')) {
         category = 'Financial Report';
-    } else if (lower.includes('lecture') || lower.includes('research') || lower.includes('algorithm') || lower.includes('university')) {
+    } else if (lower.includes('lecture') || lower.includes('research') || lower.includes('algorithm') || lower.includes('university') || lower.includes('laboratory')) {
         category = 'Academic / Research';
-    } else if (lower.includes('api') || lower.includes('server') || lower.includes('database') || lower.includes('architecture')) {
+    } else if (lower.includes('api') || lower.includes('server') || lower.includes('database') || lower.includes('architecture') || lower.includes('resume') || lower.includes('cv')) {
         category = 'Technical Documentation';
     }
 
-    let summary = buildExtractiveFallback(cleanText);
+    let summary = buildLocalSummary(extractedText, originalName);
+    let keywords = extractLocalKeywords(extractedText);
     let keyFindings = [];
+    let aiAnalyzed = false;
+    let finalText = extractedText;
 
-    if (process.env.GEMINI_API_KEY && cleanText.length > 25) {
+    if (process.env.GEMINI_API_KEY) {
         try {
             const { GoogleGenAI } = require('@google/genai');
             const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-            const prompt = `Analyze the following document and return ONLY valid JSON with these exact keys:
+
+            const instruction = `You are a precise document analysis engine. Analyze the provided document and return ONLY valid JSON with these exact keys:
 {
-  "summary": "2-3 sentence executive summary in English explaining the core purpose and conclusions (do not copy raw headers)",
-  "category": "one of: Legal / Contract, Financial Report, Academic / Research, Technical Documentation, General Document",
-  "keywords": ["5 to 6 specific domain terms in lowercase"],
-  "keyFindings": ["3 short factual takeaways from the document"]
-}
+  "summary": "Clear 2-3 sentence executive summary in English describing what this document is about and its main conclusions",
+  "category": "Choose strictly one: Legal / Contract, Financial Report, Academic / Research, Technical Documentation, General Document",
+  "keywords": ["5 to 6 concise single-word or two-word topic tags in lowercase"],
+  "keyFindings": ["3 specific factual points or key details extracted from the content"],
+  "ocrText": "If input is an image without extracted text, transcribe the visible text; otherwise leave empty string"
+}`;
 
-Document filename: ${originalName}
-Document text:
-${cleanText.slice(0, 6000)}`;
+            let contentsPayload;
+            if (mimeType.startsWith('image/')) {
+                const imgBase64 = fs.readFileSync(path.resolve(filePath)).toString('base64');
+                contentsPayload = [
+                    instruction,
+                    {
+                        inlineData: {
+                            data: imgBase64,
+                            mimeType: mimeType
+                        }
+                    }
+                ];
+            } else if (extractedText && extractedText.length > 15) {
+                contentsPayload = `${instruction}\n\nFilename: ${originalName}\nDocument content:\n${extractedText.slice(0, 8000)}`;
+            }
 
-            const response = await ai.models.generateContent({
-                model: 'gemini-2.5-flash',
-                contents: prompt,
-                config: {
-                    responseMimeType: 'application/json'
-                }
-            });
+            if (contentsPayload) {
+                const response = await ai.models.generateContent({
+                    model: 'gemini-2.5-flash',
+                    contents: contentsPayload,
+                    config: {
+                        responseMimeType: 'application/json'
+                    }
+                });
 
-            if (response && response.text) {
-                const parsed = JSON.parse(response.text.trim());
-                if (parsed.summary) summary = parsed.summary;
-                if (parsed.category) category = parsed.category;
-                if (Array.isArray(parsed.keywords) && parsed.keywords.length > 0) {
-                    keywords.splice(0, keywords.length, ...parsed.keywords.slice(0, 6));
-                }
-                if (Array.isArray(parsed.keyFindings)) {
-                    keyFindings = parsed.keyFindings.slice(0, 3);
+                if (response && response.text) {
+                    const parsed = JSON.parse(response.text.trim());
+                    if (parsed.summary) summary = parsed.summary;
+                    if (parsed.category) category = parsed.category;
+                    if (Array.isArray(parsed.keywords) && parsed.keywords.length > 0) {
+                        keywords = parsed.keywords.slice(0, 6).map((k) => String(k).toLowerCase());
+                    }
+                    if (Array.isArray(parsed.keyFindings) && parsed.keyFindings.length > 0) {
+                        keyFindings = parsed.keyFindings.slice(0, 4);
+                    }
+                    if (!finalText && parsed.ocrText) {
+                        finalText = parsed.ocrText;
+                    }
+                    aiAnalyzed = true;
                 }
             }
         } catch (aiErr) {
-            console.error('Gemini analysis fallback triggered:', aiErr.message);
+            console.error('Gemini API error:', aiErr.message);
         }
     }
 
-    return { summary, keyFindings, keywords, wordCount, category };
+    return {
+        summary,
+        keyFindings,
+        keywords,
+        wordCount: finalText ? finalText.split(/\s+/).filter(Boolean).length : wordCount,
+        category,
+        aiAnalyzed,
+        extractedText: finalText
+    };
 };
 
 const singleFileUpload = async (req, res) => {
@@ -143,24 +187,30 @@ const singleFileUpload = async (req, res) => {
         if (!req.file) {
             return res.status(400).send('No file uploaded or unsupported file format');
         }
-        const extractedText = await extractDocumentContent(
+        const rawText = await extractDocumentContent(
             req.file.path,
             req.file.mimetype,
             req.file.originalname
         );
-        const analysis = await analyzeDocumentText(extractedText, req.file.originalname);
+        const analysis = await analyzeDocument(
+            req.file.path,
+            req.file.mimetype,
+            rawText,
+            req.file.originalname
+        );
 
         const file = new SingleFile({
             fileName: req.file.originalname,
             filePath: req.file.path,
             fileType: req.file.mimetype,
             fileSize: fileSizeFormatter(req.file.size, 2),
-            extractedText: extractedText.slice(0, 12000),
+            extractedText: (analysis.extractedText || '').slice(0, 15000),
             summary: analysis.summary,
             keyFindings: analysis.keyFindings,
             keywords: analysis.keywords,
             wordCount: analysis.wordCount,
-            category: analysis.category
+            category: analysis.category,
+            aiAnalyzed: analysis.aiAnalyzed
         });
         await file.save();
         res.status(201).send(file);
@@ -178,12 +228,17 @@ const multipleFileUpload = async (req, res) => {
         let combinedTexts = [];
 
         for (const element of req.files) {
-            const extractedText = await extractDocumentContent(
+            const rawText = await extractDocumentContent(
                 element.path,
                 element.mimetype,
                 element.originalname
             );
-            const analysis = await analyzeDocumentText(extractedText, element.originalname);
+            const analysis = await analyzeDocument(
+                element.path,
+                element.mimetype,
+                rawText,
+                element.originalname
+            );
             combinedTexts.push(`${element.originalname}: ${analysis.summary}`);
 
             filesArray.push({
@@ -191,19 +246,20 @@ const multipleFileUpload = async (req, res) => {
                 filePath: element.path,
                 fileType: element.mimetype,
                 fileSize: fileSizeFormatter(element.size, 2),
-                extractedText: extractedText.slice(0, 6000),
+                extractedText: (analysis.extractedText || '').slice(0, 8000),
                 summary: analysis.summary,
                 keyFindings: analysis.keyFindings,
                 keywords: analysis.keywords,
                 wordCount: analysis.wordCount,
-                category: analysis.category
+                category: analysis.category,
+                aiAnalyzed: analysis.aiAnalyzed
             });
         }
 
         const multipleFiles = new MultipleFile({
             title: req.body.title || 'Document Batch',
             files: filesArray,
-            batchSummary: combinedTexts.join(' | ').slice(0, 500)
+            batchSummary: combinedTexts.join(' | ').slice(0, 600)
         });
         await multipleFiles.save();
         res.status(201).send(multipleFiles);
