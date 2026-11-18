@@ -5,9 +5,7 @@ const SingleFile = require('../models/singlefile');
 const MultipleFile = require('../models/multiplefile');
 
 const fileSizeFormatter = (bytes, decimal) => {
-    if (bytes === 0) {
-        return '0 Bytes';
-    }
+    if (bytes === 0) return '0 Bytes';
     const dm = decimal || 2;
     const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
     const index = Math.floor(Math.log(bytes) / Math.log(1000));
@@ -28,20 +26,29 @@ const extractDocumentContent = async (filePath, mimeType, originalName) => {
                 const parsed = await parser.getText();
                 text = parsed.text || '';
             }
-        } else if (
-            mimeType.startsWith('text/') ||
-            mimeType === 'application/json'
-        ) {
+        } else if (mimeType.startsWith('text/') || mimeType === 'application/json') {
             text = fs.readFileSync(absolutePath, 'utf8');
         } else if (mimeType.startsWith('image/')) {
-            text = `Document image: ${originalName} (${mimeType})`;
+            text = `Image attachment: ${originalName} (${mimeType})`;
         } else {
-            text = `Document of type ${mimeType}: ${originalName}`;
+            text = `Binary document (${mimeType}): ${originalName}`;
         }
     } catch (err) {
-        text = `File uploaded: ${originalName}. Automatic text extraction is unavailable.`;
+        text = `Uploaded file: ${originalName}. Text extraction failed.`;
     }
     return text.replace(/\s+/g, ' ').trim();
+};
+
+const buildExtractiveFallback = (cleanText) => {
+    const sentences = cleanText
+        .split(/(?<=[.!?])\s+/)
+        .map((s) => s.trim())
+        .filter((s) => s.length > 35 && s.length < 320);
+
+    if (sentences.length >= 2) {
+        return sentences.slice(0, 2).join(' ');
+    }
+    return cleanText.length > 260 ? cleanText.slice(0, 260) + '...' : cleanText;
 };
 
 const analyzeDocumentText = async (text, originalName) => {
@@ -85,27 +92,50 @@ const analyzeDocumentText = async (text, originalName) => {
         category = 'Technical Documentation';
     }
 
-    let summary = cleanText.length > 220
-        ? cleanText.slice(0, 220) + '...'
-        : cleanText;
+    let summary = buildExtractiveFallback(cleanText);
+    let keyFindings = [];
 
-    if (process.env.GEMINI_API_KEY && cleanText.length > 30) {
+    if (process.env.GEMINI_API_KEY && cleanText.length > 25) {
         try {
             const { GoogleGenAI } = require('@google/genai');
             const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+            const prompt = `Analyze the following document and return ONLY valid JSON with these exact keys:
+{
+  "summary": "2-3 sentence executive summary in English explaining the core purpose and conclusions (do not copy raw headers)",
+  "category": "one of: Legal / Contract, Financial Report, Academic / Research, Technical Documentation, General Document",
+  "keywords": ["5 to 6 specific domain terms in lowercase"],
+  "keyFindings": ["3 short factual takeaways from the document"]
+}
+
+Document filename: ${originalName}
+Document text:
+${cleanText.slice(0, 6000)}`;
+
             const response = await ai.models.generateContent({
                 model: 'gemini-2.5-flash',
-                contents: `Provide a concise, structured summary (2-3 sentences in English) for the following document:\n\n${cleanText.slice(0, 4000)}`
+                contents: prompt,
+                config: {
+                    responseMimeType: 'application/json'
+                }
             });
+
             if (response && response.text) {
-                summary = response.text.trim();
+                const parsed = JSON.parse(response.text.trim());
+                if (parsed.summary) summary = parsed.summary;
+                if (parsed.category) category = parsed.category;
+                if (Array.isArray(parsed.keywords) && parsed.keywords.length > 0) {
+                    keywords.splice(0, keywords.length, ...parsed.keywords.slice(0, 6));
+                }
+                if (Array.isArray(parsed.keyFindings)) {
+                    keyFindings = parsed.keyFindings.slice(0, 3);
+                }
             }
         } catch (aiErr) {
-            // Keep local summary if external API is unavailable
+            console.error('Gemini analysis fallback triggered:', aiErr.message);
         }
     }
 
-    return { summary, keywords, wordCount, category };
+    return { summary, keyFindings, keywords, wordCount, category };
 };
 
 const singleFileUpload = async (req, res) => {
@@ -125,8 +155,9 @@ const singleFileUpload = async (req, res) => {
             filePath: req.file.path,
             fileType: req.file.mimetype,
             fileSize: fileSizeFormatter(req.file.size, 2),
-            extractedText: extractedText.slice(0, 10000),
+            extractedText: extractedText.slice(0, 12000),
             summary: analysis.summary,
+            keyFindings: analysis.keyFindings,
             keywords: analysis.keywords,
             wordCount: analysis.wordCount,
             category: analysis.category
@@ -155,23 +186,24 @@ const multipleFileUpload = async (req, res) => {
             const analysis = await analyzeDocumentText(extractedText, element.originalname);
             combinedTexts.push(`${element.originalname}: ${analysis.summary}`);
 
-            const file = {
+            filesArray.push({
                 fileName: element.originalname,
                 filePath: element.path,
                 fileType: element.mimetype,
                 fileSize: fileSizeFormatter(element.size, 2),
+                extractedText: extractedText.slice(0, 6000),
                 summary: analysis.summary,
+                keyFindings: analysis.keyFindings,
                 keywords: analysis.keywords,
                 wordCount: analysis.wordCount,
                 category: analysis.category
-            };
-            filesArray.push(file);
+            });
         }
 
         const multipleFiles = new MultipleFile({
             title: req.body.title || 'Document Batch',
             files: filesArray,
-            batchSummary: `Analyzed files: ${filesArray.length}. ${combinedTexts.join(' | ').slice(0, 400)}`
+            batchSummary: combinedTexts.join(' | ').slice(0, 500)
         });
         await multipleFiles.save();
         res.status(201).send(multipleFiles);

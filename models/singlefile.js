@@ -27,6 +27,10 @@ const singleFileSchema = new Schema({
         type: String,
         default: ''
     },
+    keyFindings: {
+        type: [String],
+        default: []
+    },
     keywords: {
         type: [String],
         default: []
