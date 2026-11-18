@@ -87,6 +87,70 @@ const extractLocalKeywords = (cleanText) => {
         .map((entry) => entry[0]);
 };
 
+const callGeminiWithAutoFallback = async (ai, apiKey, contentsPayload) => {
+    const primaryModels = ['gemini-3.8-flash', 'gemini-3.0-flash', 'gemini-2.0-flash'];
+    let lastError = null;
+
+    for (const modelName of primaryModels) {
+        try {
+            const response = await ai.models.generateContent({
+                model: modelName,
+                contents: contentsPayload,
+                config: { responseMimeType: 'application/json' }
+            });
+            if (response && response.text) {
+                console.log(`Gemini analysis succeeded with model: ${modelName}`);
+                return response.text;
+            }
+        } catch (err) {
+            lastError = err;
+        }
+    }
+
+    // Dynamic discovery of available generateContent models for this API key
+    try {
+        const listRes = await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(apiKey)}`
+        );
+        if (listRes.ok) {
+            const listData = await listRes.json();
+            const candidates = (listData.models || [])
+                .filter(
+                    (m) =>
+                        Array.isArray(m.supportedGenerationMethods) &&
+                        m.supportedGenerationMethods.includes('generateContent') &&
+                        m.name &&
+                        m.name.includes('gemini') &&
+                        !m.name.includes('embedding') &&
+                        !m.name.includes('aqa')
+                )
+                .map((m) => m.name.replace(/^models\//, ''))
+                .sort((a, b) => (b.includes('flash') ? 1 : 0) - (a.includes('flash') ? 1 : 0));
+
+            for (const candidate of candidates) {
+                if (primaryModels.includes(candidate)) continue;
+                try {
+                    const response = await ai.models.generateContent({
+                        model: candidate,
+                        contents: contentsPayload,
+                        config: { responseMimeType: 'application/json' }
+                    });
+                    if (response && response.text) {
+                        console.log(`Gemini analysis succeeded with discovered model: ${candidate}`);
+                        return response.text;
+                    }
+                } catch (err) {
+                    lastError = err;
+                }
+            }
+        }
+    } catch (discoveryErr) {
+        lastError = discoveryErr;
+    }
+
+    throw lastError || new Error('No compatible Gemini model responded');
+};
+
 const analyzeDocument = async (filePath, mimeType, extractedText, originalName) => {
     const words = extractedText
         ? extractedText.split(/\s+/).filter((w) => w.length > 0)
@@ -149,37 +213,26 @@ const analyzeDocument = async (filePath, mimeType, extractedText, originalName) 
             }
 
             if (contentsPayload) {
-                const response = await ai.models.generateContent({
-                    model: 'gemini-3.8-flash',
-                    contents: contentsPayload,
-                    config: {
-                        responseMimeType: 'application/json'
-                    }
-                });
-
-                if (response && response.text) {
-                    const cleanJson = response.text
-                        .replace(/^```json\s*/i, '')
-                        .replace(/^```\s*/i, '')
-                        .replace(/```\s*$/i, '')
-                        .trim();
-                    const parsed = JSON.parse(cleanJson);
-                    if (parsed.summary) summary = parsed.summary;
-                    if (parsed.category) category = parsed.category;
-                    if (Array.isArray(parsed.keywords) && parsed.keywords.length > 0) {
-                        keywords = parsed.keywords.slice(0, 6).map((k) => String(k).toLowerCase());
-                    }
-                    if (Array.isArray(parsed.keyFindings) && parsed.keyFindings.length > 0) {
-                        keyFindings = parsed.keyFindings.slice(0, 4);
-                    }
-                    if (!finalText && parsed.ocrText) {
-                        finalText = parsed.ocrText;
-                    }
-                    aiAnalyzed = true;
-                    aiError = '';
-                } else {
-                    aiError = 'Empty response returned from Gemini API';
+                const rawResponseText = await callGeminiWithAutoFallback(ai, apiKey, contentsPayload);
+                const cleanJson = rawResponseText
+                    .replace(/^```json\s*/i, '')
+                    .replace(/^```\s*/i, '')
+                    .replace(/```\s*$/i, '')
+                    .trim();
+                const parsed = JSON.parse(cleanJson);
+                if (parsed.summary) summary = parsed.summary;
+                if (parsed.category) category = parsed.category;
+                if (Array.isArray(parsed.keywords) && parsed.keywords.length > 0) {
+                    keywords = parsed.keywords.slice(0, 6).map((k) => String(k).toLowerCase());
                 }
+                if (Array.isArray(parsed.keyFindings) && parsed.keyFindings.length > 0) {
+                    keyFindings = parsed.keyFindings.slice(0, 4);
+                }
+                if (!finalText && parsed.ocrText) {
+                    finalText = parsed.ocrText;
+                }
+                aiAnalyzed = true;
+                aiError = '';
             }
         } catch (aiErr) {
             aiError = aiErr.message || 'Unknown Gemini API error';
