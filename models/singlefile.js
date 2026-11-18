@@ -37,7 +37,7 @@ const singleFileSchema = new Schema({
     },
     category: {
         type: String,
-        default: 'Общий документ'
+        default: 'General Document'
     }
 }, { timestamps: true });
 

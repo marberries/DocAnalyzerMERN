@@ -20,20 +20,26 @@ const extractDocumentContent = async (filePath, mimeType, originalName) => {
         const absolutePath = path.resolve(filePath);
         if (mimeType === 'application/pdf') {
             const dataBuffer = fs.readFileSync(absolutePath);
-            const parsed = await pdfParse(dataBuffer);
-            text = parsed.text || '';
+            if (typeof pdfParse === 'function') {
+                const parsed = await pdfParse(dataBuffer);
+                text = parsed.text || '';
+            } else if (pdfParse && pdfParse.PDFParse) {
+                const parser = new pdfParse.PDFParse({ data: dataBuffer });
+                const parsed = await parser.getText();
+                text = parsed.text || '';
+            }
         } else if (
             mimeType.startsWith('text/') ||
             mimeType === 'application/json'
         ) {
             text = fs.readFileSync(absolutePath, 'utf8');
         } else if (mimeType.startsWith('image/')) {
-            text = `Изображение документа: ${originalName} (${mimeType})`;
+            text = `Document image: ${originalName} (${mimeType})`;
         } else {
-            text = `Документ формата ${mimeType}: ${originalName}`;
+            text = `Document of type ${mimeType}: ${originalName}`;
         }
     } catch (err) {
-        text = `Файл загружен: ${originalName}. Автоматическое извлечение текста недоступно.`;
+        text = `File uploaded: ${originalName}. Automatic text extraction is unavailable.`;
     }
     return text.replace(/\s+/g, ' ').trim();
 };
@@ -42,16 +48,17 @@ const analyzeDocumentText = async (text, originalName) => {
     const cleanText = text || originalName;
     const words = cleanText
         .toLowerCase()
-        .replace(/[^a-zа-яё0-9\s-]/gi, '')
+        .replace(/[^a-z0-9\s-]/gi, '')
         .split(/\s+/)
         .filter((w) => w.length > 3);
 
     const wordCount = words.length;
 
     const stopWords = new Set([
-        'для', 'что', 'это', 'как', 'или', 'при', 'все', 'так', 'его', 'она',
-        'они', 'быть', 'того', 'этого', 'которые', 'также', 'после', 'между',
-        'this', 'that', 'with', 'from', 'have', 'were', 'been', 'their', 'which'
+        'this', 'that', 'with', 'from', 'have', 'were', 'been', 'their', 'which',
+        'will', 'would', 'there', 'about', 'into', 'more', 'other', 'such', 'only',
+        'also', 'than', 'then', 'them', 'these', 'some', 'could', 'what', 'when',
+        'where', 'each', 'every', 'both', 'most', 'many', 'must', 'shall', 'should'
     ]);
 
     const freq = {};
@@ -66,16 +73,16 @@ const analyzeDocumentText = async (text, originalName) => {
         .slice(0, 6)
         .map((entry) => entry[0]);
 
-    let category = 'Общий документ';
+    let category = 'General Document';
     const lower = cleanText.toLowerCase();
-    if (lower.includes('договор') || lower.includes('соглашение') || lower.includes('contract')) {
-        category = 'Юридический / Договор';
-    } else if (lower.includes('счет') || lower.includes('оплата') || lower.includes('бюджет') || lower.includes('invoice')) {
-        category = 'Финансовый отчет';
-    } else if (lower.includes('лекция') || lower.includes('исследование') || lower.includes('алгоритм') || lower.includes('thesis')) {
-        category = 'Учебный / Научный материал';
-    } else if (lower.includes('api') || lower.includes('server') || lower.includes('database') || lower.includes('код')) {
-        category = 'Техническая документация';
+    if (lower.includes('contract') || lower.includes('agreement') || lower.includes('clause') || lower.includes('legal')) {
+        category = 'Legal / Contract';
+    } else if (lower.includes('invoice') || lower.includes('payment') || lower.includes('budget') || lower.includes('financial')) {
+        category = 'Financial Report';
+    } else if (lower.includes('lecture') || lower.includes('research') || lower.includes('algorithm') || lower.includes('university')) {
+        category = 'Academic / Research';
+    } else if (lower.includes('api') || lower.includes('server') || lower.includes('database') || lower.includes('architecture')) {
+        category = 'Technical Documentation';
     }
 
     let summary = cleanText.length > 220
@@ -88,13 +95,13 @@ const analyzeDocumentText = async (text, originalName) => {
             const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
             const response = await ai.models.generateContent({
                 model: 'gemini-2.5-flash',
-                contents: `Сделай краткую структурированную выжимку (2-3 предложения на русском языке) для следующего документа:\n\n${cleanText.slice(0, 4000)}`
+                contents: `Provide a concise, structured summary (2-3 sentences in English) for the following document:\n\n${cleanText.slice(0, 4000)}`
             });
             if (response && response.text) {
                 summary = response.text.trim();
             }
         } catch (aiErr) {
-            // При ошибке внешнего API сохраняется локальная выжимка
+            // Keep local summary if external API is unavailable
         }
     }
 
@@ -104,7 +111,7 @@ const analyzeDocumentText = async (text, originalName) => {
 const singleFileUpload = async (req, res) => {
     try {
         if (!req.file) {
-            return res.status(400).send('Файл не загружен или формат не поддерживается');
+            return res.status(400).send('No file uploaded or unsupported file format');
         }
         const extractedText = await extractDocumentContent(
             req.file.path,
@@ -134,7 +141,7 @@ const singleFileUpload = async (req, res) => {
 const multipleFileUpload = async (req, res) => {
     try {
         if (!req.files || req.files.length === 0) {
-            return res.status(400).send('Файлы не выбраны');
+            return res.status(400).send('No files selected');
         }
         let filesArray = [];
         let combinedTexts = [];
@@ -162,9 +169,9 @@ const multipleFileUpload = async (req, res) => {
         }
 
         const multipleFiles = new MultipleFile({
-            title: req.body.title || 'Пакет документов',
+            title: req.body.title || 'Document Batch',
             files: filesArray,
-            batchSummary: `Проанализировано файлов: ${filesArray.length}. ${combinedTexts.join(' | ').slice(0, 400)}`
+            batchSummary: `Analyzed files: ${filesArray.length}. ${combinedTexts.join(' | ').slice(0, 400)}`
         });
         await multipleFiles.save();
         res.status(201).send(multipleFiles);
@@ -195,14 +202,14 @@ const deleteSingleFile = async (req, res) => {
     try {
         const file = await SingleFile.findById(req.params.id);
         if (!file) {
-            return res.status(404).send('Документ не найден');
+            return res.status(404).send('Document not found');
         }
         const absolutePath = path.resolve(file.filePath);
         if (fs.existsSync(absolutePath)) {
             fs.unlinkSync(absolutePath);
         }
         await SingleFile.findByIdAndDelete(req.params.id);
-        res.status(200).send({ message: 'Документ удален', id: req.params.id });
+        res.status(200).send({ message: 'Document deleted successfully', id: req.params.id });
     } catch (error) {
         res.status(400).send(error.message);
     }
