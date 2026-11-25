@@ -87,21 +87,44 @@ const extractLocalKeywords = (cleanText) => {
         .map((entry) => entry[0]);
 };
 
-const MODEL_GROUPS = [
-    ['gemini-3.6-flash', 'gemini-3.5-flash'],
-    ['gemini-3.8-flash', 'gemini-3.7-flash'],
-    ['gemini-3.1-flash-lite', 'gemini-3.1-pro-preview']
+// Free-tier Gemini keys have a small per-model daily quota, so the app walks a
+// short list of current text models in order: one request per document on the
+// happy path, cached winner for subsequent documents, and a cooldown for models
+// that answer 429/503/404 so they are not hammered on every upload.
+const MODEL_PRIORITY = [
+    'gemini-3.5-flash-lite',
+    'gemini-3.1-flash-lite',
+    'gemini-3.6-flash',
+    'gemini-3.5-flash',
+    'gemini-3.8-flash',
+    'gemini-3.7-flash'
 ];
 
 const MODEL_CACHE_TTL_MS = 30 * 60 * 1000;
 const CALL_TIMEOUT_MS = 20000;
-const CHAIN_BUDGET_MS = 40000;
+const CHAIN_BUDGET_MS = 45000;
 const DISCOVERY_TIMEOUT_MS = 6000;
 const EXCLUDED_MODEL_PATTERN = /(tts|image|embedding|audio|veo|imagen|robotics|computer-use|deep-research|lyria|antigravity|nano-banana|transcribe|omni)/i;
 
 let cachedGeminiModel = null;
 let discoveredModels = null;
 let discoveredAt = 0;
+
+const modelBlockedUntil = new Map();
+
+const isModelBlocked = (model) => (modelBlockedUntil.get(model) || 0) > Date.now();
+
+const blockModelFor = (model, ms) => {
+    modelBlockedUntil.set(model, Date.now() + ms);
+};
+
+const blockDelayFor = (err) => {
+    const description = describeGeminiError(err);
+    if (/RESOURCE_EXHAUSTED|quota/i.test(description)) return 10 * 60 * 1000;
+    if (/UNAVAILABLE|high demand|timed out/i.test(description)) return 60 * 1000;
+    if (/NOT_FOUND|not found|no longer available/i.test(description)) return 6 * 60 * 60 * 1000;
+    return 60 * 1000;
+};
 
 const withTimeout = (promise, ms, label) => new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(label + ' timed out after ' + ms + ' ms')), ms);
@@ -114,7 +137,7 @@ const withTimeout = (promise, ms, label) => new Promise((resolve, reject) => {
 const friendlyAnalysisError = (err) => {
     const description = describeGeminiError(err || {});
     if (/RESOURCE_EXHAUSTED|quota/i.test(description)) {
-        return 'Gemini quota limit reached, so a local summary was generated. Try again in a minute.';
+        return 'Gemini quota limit reached, so a local summary was generated. Try again later or use another API key.';
     }
     if (/UNAVAILABLE|high demand/i.test(description)) {
         return 'Gemini is temporarily overloaded, so a local summary was generated. Try again shortly.';
@@ -151,13 +174,6 @@ const generateOnce = async (ai, modelName, contentsPayload) => {
     }
     return response.text;
 };
-
-const raceModels = (models, ai, contentsPayload) => Promise.any(
-    models.map(async (model) => {
-        const text = await generateOnce(ai, model, contentsPayload);
-        return { model: model, text: text };
-    })
-);
 
 const scoreModelName = (name) => {
     let score = 0;
@@ -198,46 +214,50 @@ const discoverTextModels = async (apiKey) => {
     }
 };
 
-// Gemini models are frequently overloaded (503) or retired (404), so a single
-// sequential fallback chain can spend a minute on dead models. Instead we run a
-// small group of known text models in parallel and take the first successful
-// answer; only the next group is tried when every model in the current one fails.
 const requestGeminiAnalysis = async (ai, apiKey, contentsPayload) => {
     const startedAt = Date.now();
-    const tried = new Set();
-    let lastError = null;
+    const candidates = [];
 
-    const groups = MODEL_GROUPS.map((group) => group.slice());
-    if (cachedGeminiModel) {
-        groups[0] = [cachedGeminiModel, ...groups[0].filter((model) => model !== cachedGeminiModel)];
+    if (cachedGeminiModel) candidates.push(cachedGeminiModel);
+    for (const model of MODEL_PRIORITY) {
+        if (!candidates.includes(model)) candidates.push(model);
     }
 
-    const runGroup = async (models) => {
-        const candidates = models.filter((model) => !tried.has(model)).slice(0, 3);
-        candidates.forEach((model) => tried.add(model));
-        if (candidates.length === 0) return null;
+    let lastError = null;
+
+    const attempt = async (model) => {
         try {
-            const result = await raceModels(candidates, ai, contentsPayload);
-            cachedGeminiModel = result.model;
-            console.log('Gemini analysis succeeded with model: ' + result.model + ' in ' + (Date.now() - startedAt) + ' ms');
-            return result.text;
+            const text = await generateOnce(ai, model, contentsPayload);
+            if (text) {
+                cachedGeminiModel = model;
+                modelBlockedUntil.delete(model);
+                console.log('Gemini analysis succeeded with model: ' + model + ' in ' + (Date.now() - startedAt) + ' ms');
+                return text;
+            }
         } catch (err) {
-            lastError = (err && err.errors && err.errors[0]) || err;
-            console.warn('Gemini group failed [' + candidates.join(', ') + ']: ' + describeGeminiError(lastError).slice(0, 160));
-            return null;
+            lastError = err;
+            blockModelFor(model, blockDelayFor(err));
+            if (cachedGeminiModel === model) cachedGeminiModel = null;
+            console.warn('Gemini model ' + model + ' failed: ' + describeGeminiError(err).slice(0, 140));
         }
+        return null;
     };
 
-    for (const group of groups) {
+    for (const model of candidates) {
         if (Date.now() - startedAt > CHAIN_BUDGET_MS) break;
-        const text = await runGroup(group);
+        if (isModelBlocked(model)) continue;
+        const text = await attempt(model);
         if (text) return text;
     }
 
     if (Date.now() - startedAt < CHAIN_BUDGET_MS) {
-        const fallbackModels = await discoverTextModels(apiKey);
-        const text = await runGroup(fallbackModels.slice(0, 3));
-        if (text) return text;
+        const discovered = await discoverTextModels(apiKey);
+        for (const model of discovered) {
+            if (candidates.includes(model) || isModelBlocked(model)) continue;
+            if (Date.now() - startedAt > CHAIN_BUDGET_MS) break;
+            const text = await attempt(model);
+            if (text) return text;
+        }
     }
 
     throw lastError || new Error('No compatible Gemini model responded');
