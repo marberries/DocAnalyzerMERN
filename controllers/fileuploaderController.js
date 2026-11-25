@@ -88,14 +88,14 @@ const extractLocalKeywords = (cleanText) => {
 };
 
 const MODEL_GROUPS = [
-    ['gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-3.8-flash'],
-    ['gemini-3.7-flash', 'gemini-3.1-flash-lite', 'gemini-3.1-pro-preview'],
-    ['gemini-4-argon', 'gemini-4-carbon', 'gemini-4-neon']
+    ['gemini-3.6-flash', 'gemini-3.5-flash'],
+    ['gemini-3.8-flash', 'gemini-3.7-flash'],
+    ['gemini-3.1-flash-lite', 'gemini-3.1-pro-preview']
 ];
 
 const MODEL_CACHE_TTL_MS = 30 * 60 * 1000;
-const CALL_TIMEOUT_MS = 12000;
-const CHAIN_BUDGET_MS = 32000;
+const CALL_TIMEOUT_MS = 20000;
+const CHAIN_BUDGET_MS = 40000;
 const DISCOVERY_TIMEOUT_MS = 6000;
 const EXCLUDED_MODEL_PATTERN = /(tts|image|embedding|audio|veo|imagen|robotics|computer-use|deep-research|lyria|antigravity|nano-banana|transcribe|omni)/i;
 
@@ -110,6 +110,20 @@ const withTimeout = (promise, ms, label) => new Promise((resolve, reject) => {
         (error) => { clearTimeout(timer); reject(error); }
     );
 });
+
+const friendlyAnalysisError = (err) => {
+    const description = describeGeminiError(err || {});
+    if (/RESOURCE_EXHAUSTED|quota/i.test(description)) {
+        return 'Gemini quota limit reached, so a local summary was generated. Try again in a minute.';
+    }
+    if (/UNAVAILABLE|high demand/i.test(description)) {
+        return 'Gemini is temporarily overloaded, so a local summary was generated. Try again shortly.';
+    }
+    if (/timed out/i.test(description)) {
+        return 'Gemini did not answer in time, so a local summary was generated. Try again shortly.';
+    }
+    return description.slice(0, 300);
+};
 
 const describeGeminiError = (err) => {
     const raw = err && err.message ? String(err.message) : 'Unknown Gemini API error';
@@ -313,7 +327,7 @@ const analyzeDocument = async (filePath, mimeType, extractedText, originalName) 
                 aiError = '';
             }
         } catch (aiErr) {
-            aiError = describeGeminiError(aiErr).slice(0, 300);
+            aiError = friendlyAnalysisError(aiErr);
             console.error('Gemini API error:', aiError);
         }
     }
