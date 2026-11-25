@@ -87,75 +87,140 @@ const extractLocalKeywords = (cleanText) => {
         .map((entry) => entry[0]);
 };
 
-const callGeminiWithAutoFallback = async (ai, apiKey, contentsPayload) => {
-    const primaryModels = ['gemini-3.8-flash', 'gemini-3.0-flash', 'gemini-2.5-flash-lite', 'gemini-2.0-flash'];
-    const tried = new Set();
+const PREFERRED_MODELS = [
+    'gemini-3.5-flash',
+    'gemini-3.8-flash',
+    'gemini-3.7-flash',
+    'gemini-3.6-flash',
+    'gemini-3.1-flash-lite',
+    'gemini-3-flash-preview',
+    'gemini-2.5-flash'
+];
+
+const MODEL_CACHE_TTL_MS = 30 * 60 * 1000;
+const CALL_TIMEOUT_MS = 15000;
+const CHAIN_BUDGET_MS = 25000;
+const DISCOVERY_TIMEOUT_MS = 6000;
+const EXCLUDED_MODEL_PATTERN = /(tts|image|embedding|audio|veo|imagen|robotics|computer-use|deep-research|lyria|antigravity|nano-banana|transcribe|omni)/i;
+
+let cachedGeminiModel = null;
+let discoveredModels = null;
+let discoveredAt = 0;
+
+const withTimeout = (promise, ms, label) => new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(label + ' timed out after ' + ms + ' ms')), ms);
+    promise.then(
+        (value) => { clearTimeout(timer); resolve(value); },
+        (error) => { clearTimeout(timer); reject(error); }
+    );
+});
+
+const describeGeminiError = (err) => {
+    const raw = err && err.message ? String(err.message) : 'Unknown Gemini API error';
+    try {
+        const parsed = JSON.parse(raw);
+        if (parsed && parsed.error) {
+            return (parsed.error.status || parsed.error.code || 'ERROR') + ': ' + (parsed.error.message || raw);
+        }
+    } catch (ignored) { /* not JSON, keep raw */ }
+    return raw;
+};
+
+const generateOnce = async (ai, modelName, contentsPayload) => {
+    const response = await withTimeout(
+        ai.models.generateContent({
+            model: modelName,
+            contents: contentsPayload,
+            config: { responseMimeType: 'application/json' }
+        }),
+        CALL_TIMEOUT_MS,
+        modelName
+    );
+    return response && response.text ? response.text : '';
+};
+
+const scoreModelName = (name) => {
+    let score = 0;
+    if (/^gemini-\d+(\.\d+)?-flash$/.test(name)) score += 100;
+    else if (/^gemini-\d+(\.\d+)?-flash-lite$/.test(name)) score += 60;
+    else if (/^gemini-\d+(\.\d+)?-flash-preview$/.test(name)) score += 40;
+    else if (/^gemini-\d+(\.\d+)?-pro/.test(name)) score += 10;
+    const version = name.match(/gemini-(\d+(?:\.\d+)?)/);
+    if (version) score += parseFloat(version[1]);
+    return score;
+};
+
+const discoverTextModels = async (apiKey) => {
+    if (discoveredModels && Date.now() - discoveredAt < MODEL_CACHE_TTL_MS) {
+        return discoveredModels;
+    }
+    try {
+        const listRes = await withTimeout(
+            fetch('https://generativelanguage.googleapis.com/v1beta/models?key=' + encodeURIComponent(apiKey)),
+            DISCOVERY_TIMEOUT_MS,
+            'Model discovery'
+        );
+        if (!listRes.ok) return discoveredModels || [];
+        const listData = await withTimeout(listRes.json(), DISCOVERY_TIMEOUT_MS, 'Model discovery JSON');
+        const names = (listData.models || [])
+            .filter((model) => Array.isArray(model.supportedGenerationMethods)
+                && model.supportedGenerationMethods.includes('generateContent')
+                && model.name
+                && !EXCLUDED_MODEL_PATTERN.test(model.name))
+            .map((model) => model.name.replace(/^models\//, ''))
+            .sort((a, b) => scoreModelName(b) - scoreModelName(a));
+        discoveredModels = names;
+        discoveredAt = Date.now();
+        return names;
+    } catch (err) {
+        console.error('Gemini model discovery failed:', describeGeminiError(err));
+        return discoveredModels || [];
+    }
+};
+
+const requestGeminiAnalysis = async (ai, apiKey, contentsPayload) => {
+    const startedAt = Date.now();
+    const attempted = new Set();
+    const candidates = [];
+
+    if (cachedGeminiModel) candidates.push(cachedGeminiModel);
+    for (const model of PREFERRED_MODELS) {
+        if (!candidates.includes(model)) candidates.push(model);
+    }
+
     let lastError = null;
 
     const tryModel = async (modelName) => {
-        if (!modelName || tried.has(modelName)) return null;
-        tried.add(modelName);
+        if (!modelName || attempted.has(modelName)) return null;
+        attempted.add(modelName);
         try {
-            const response = await ai.models.generateContent({
-                model: modelName,
-                contents: contentsPayload,
-                config: { responseMimeType: 'application/json' }
-            });
-            if (response && response.text) {
-                console.log(`Gemini analysis succeeded with model: ${modelName}`);
-                return response.text;
+            const text = await generateOnce(ai, modelName, contentsPayload);
+            if (text) {
+                cachedGeminiModel = modelName;
+                console.log('Gemini analysis succeeded with model: ' + modelName);
+                return text;
             }
         } catch (err) {
             lastError = err;
-            try {
-                const plainResponse = await ai.models.generateContent({
-                    model: modelName,
-                    contents: contentsPayload
-                });
-                if (plainResponse && plainResponse.text) {
-                    console.log(`Gemini analysis (plain JSON) succeeded with model: ${modelName}`);
-                    return plainResponse.text;
-                }
-            } catch (plainErr) {
-                lastError = plainErr;
-            }
+            if (cachedGeminiModel === modelName) cachedGeminiModel = null;
+            console.warn('Gemini model ' + modelName + ' failed: ' + describeGeminiError(err).slice(0, 160));
         }
         return null;
     };
 
-    for (const modelName of primaryModels) {
-        const resText = await tryModel(modelName);
-        if (resText) return resText;
+    for (const modelName of candidates) {
+        const text = await tryModel(modelName);
+        if (text) return text;
+        if (Date.now() - startedAt > CHAIN_BUDGET_MS) break;
     }
 
-    try {
-        const listRes = await fetch(
-            `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(apiKey)}`
-        );
-        if (listRes.ok) {
-            const listData = await listRes.json();
-            const candidates = (listData.models || [])
-                .filter(
-                    (m) =>
-                        Array.isArray(m.supportedGenerationMethods) &&
-                        m.supportedGenerationMethods.includes('generateContent') &&
-                        m.name &&
-                        m.name.includes('gemini') &&
-                        !m.name.includes('embedding') &&
-                        !m.name.includes('aqa') &&
-                        !m.name.includes('imagen') &&
-                        !m.name.includes('veo')
-                )
-                .map((m) => m.name.replace(/^models\//, ''))
-                .sort((a, b) => (b.includes('flash') ? 1 : 0) - (a.includes('flash') ? 1 : 0));
-
-            for (const candidate of candidates) {
-                const resText = await tryModel(candidate);
-                if (resText) return resText;
-            }
+    if (Date.now() - startedAt < CHAIN_BUDGET_MS) {
+        const fallbackModels = await discoverTextModels(apiKey);
+        for (const modelName of fallbackModels) {
+            const text = await tryModel(modelName);
+            if (text) return text;
+            if (Date.now() - startedAt > CHAIN_BUDGET_MS + 10000) break;
         }
-    } catch (discoveryErr) {
-        lastError = discoveryErr;
     }
 
     throw lastError || new Error('No compatible Gemini model responded');
@@ -223,7 +288,7 @@ const analyzeDocument = async (filePath, mimeType, extractedText, originalName) 
             }
 
             if (contentsPayload) {
-                const rawResponseText = await callGeminiWithAutoFallback(ai, apiKey, contentsPayload);
+                const rawResponseText = await requestGeminiAnalysis(ai, apiKey, contentsPayload);
                 const cleanJson = rawResponseText
                     .replace(/^```json\s*/i, '')
                     .replace(/^```\s*/i, '')
@@ -245,7 +310,7 @@ const analyzeDocument = async (filePath, mimeType, extractedText, originalName) 
                 aiError = '';
             }
         } catch (aiErr) {
-            aiError = aiErr.message || 'Unknown Gemini API error';
+            aiError = describeGeminiError(aiErr).slice(0, 300);
             console.error('Gemini API error:', aiError);
         }
     }
