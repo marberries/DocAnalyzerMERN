@@ -1,0 +1,24 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  syntax-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: node --check index.js
+      - run: node --check database.js
+      - run: node --check controllers/fileuploaderController.js
+      - run: node --check helpers/filehelper.js
+      - run: node --check routes/file-upload-routes.js
+      - run: node --check models/singlefile.js
+      - run: node --check models/multiplefile.js
