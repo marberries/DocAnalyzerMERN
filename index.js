@@ -2,6 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const multer = require('multer');
+const mongoose = require('mongoose');
 const path = require('path');
 const connectDB = require('./database');
 const fileRoutes = require('./routes/file-upload-routes');
@@ -14,6 +15,18 @@ connectDB();
 app.use(cors());
 app.use(express.json());
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+
+const DB_STATES = ['disconnected', 'connected', 'connecting', 'disconnecting'];
+
+app.get('/api/health', (req, res) => {
+    res.json({
+        status: 'ok',
+        database: DB_STATES[mongoose.connection.readyState] || 'unknown',
+        aiConfigured: Boolean((process.env.GEMINI_API_KEY || '').trim()),
+        uptimeSeconds: Math.round(process.uptime()),
+        timestamp: new Date().toISOString()
+    });
+});
 
 app.use('/api', fileRoutes.routes);
 
