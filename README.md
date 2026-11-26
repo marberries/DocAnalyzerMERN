@@ -42,6 +42,7 @@ npm run dev               # nodemon on http://localhost:5001
 | Method | Path | Description |
 | --- | --- | --- |
 | GET | `/` | Health message |
+| GET | `/api/health` | Service and database status (JSON) |
 | POST | `/api/singleFile` | Upload and analyse one document (`file` field) |
 | POST | `/api/multipleFiles` | Upload and analyse a batch (`files` fields, `title`) |
 | POST | `/api/reanalyze/:id` | Re-run AI analysis for a stored document |
@@ -61,3 +62,14 @@ npm run dev               # nodemon on http://localhost:5001
 - If Atlas refuses the connection, add your current public IP under
   **Atlas → Network Access** (or use `0.0.0.0/0` for a short demo).
 - Original files are stored in `uploads/` and are not committed to git.
+
+## Troubleshooting
+
+- **`buffering timed out` or a database error on upload** — MongoDB Atlas is not
+  reachable. Check `GET /api/health`; `database` must be `connected`. Add your
+  current public IP under **Atlas → Network Access**.
+- **`aiAnalyzed: false` in the response** — Gemini was unavailable or the free-tier
+  quota (about 20 requests per day per model) is exhausted. The document is still
+  stored with a local summary; retry later with "Re-analyze with AI".
+- **`Backend Offline` in the React client** — the API is not running on port 5001,
+  or the dev proxy in the client cannot reach it.
