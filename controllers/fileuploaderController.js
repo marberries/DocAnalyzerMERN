@@ -5,57 +5,9 @@
  *  - batch upload (POST /multipleFiles)
  *  - re-analysis (POST /reanalyze/:id)
  *  - deletion (DELETE /:id)
- * Extracts text (PDF/DOCX/TXT/JSON), builds summary,
- * extracts keywords and assigns a topic.
- */
-
-/**
- * fileuploaderController.js
- * Handles document upload and analysis:
- *  - single file upload (POST /singleFile)
- *  - batch upload (POST /multipleFiles)
- *  - re-analysis (POST /reanalyze/:id)
- *  - deletion (DELETE /:id)
- * Extracts text (PDF/DOCX/TXT/JSON), builds summary,
- * extracts keywords and assigns a topic.
- */
-
-/**
- * fileuploaderController.js
- * Handles document upload and analysis:
- *  - single file upload (POST /singleFile)
- *  - batch upload (POST /multipleFiles)
- *  - re-analysis (POST /reanalyze/:id)
- *  - deletion (DELETE /:id)
- * Extracts text (PDF/DOCX/TXT/JSON), builds summary,
- * extracts keywords and assigns a topic.
- */
-
-/**
- * fileuploaderController.js
- * Handles document upload and analysis:
- *  - single file upload (POST /singleFile)
- *  - batch upload (POST /multipleFiles)
- *  - re-analysis (POST /reanalyze/:id)
- *  - deletion (DELETE /:id)
- * Extracts text (PDF/DOCX/TXT/JSON), builds summary,
- * extracts keywords and assigns a topic.
- */
-
-/**
- * fileuploaderController.js
- * Handles document upload and analysis:
- *  - single file upload (POST /singleFile)
- *  - batch upload (POST /multipleFiles)
- *  - re-analysis (POST /reanalyze/:id)
- *  - deletion (DELETE /:id)
- * Extracts text (PDF/DOCX/TXT/JSON), builds summary,
- * extracts keywords and assigns a topic.
- */
-
-/**
- * fileuploaderController.js
- * ...
+ * Extracts text (PDF/DOCX/TXT/JSON), builds a summary with Gemini
+ * (local fallback when the API is unavailable), extracts keywords
+ * and assigns a topic category.
  */
 
 const fs = require('fs');
