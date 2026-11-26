@@ -1,3 +1,30 @@
+/**
+ * fileuploaderController.js
+ * Handles document upload and analysis:
+ *  - single file upload (POST /singleFile)
+ *  - batch upload (POST /multipleFiles)
+ *  - re-analysis (POST /reanalyze/:id)
+ *  - deletion (DELETE /:id)
+ * Extracts text (PDF/DOCX/TXT/JSON), builds summary,
+ * extracts keywords and assigns a topic.
+ */
+
+/**
+ * fileuploaderController.js
+ * Handles document upload and analysis:
+ *  - single file upload (POST /singleFile)
+ *  - batch upload (POST /multipleFiles)
+ *  - re-analysis (POST /reanalyze/:id)
+ *  - deletion (DELETE /:id)
+ * Extracts text (PDF/DOCX/TXT/JSON), builds summary,
+ * extracts keywords and assigns a topic.
+ */
+
+/**
+ * fileuploaderController.js
+ * ...
+ */
+
 const fs = require('fs');
 const path = require('path');
 const pdfParse = require('pdf-parse');
