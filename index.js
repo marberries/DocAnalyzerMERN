@@ -18,11 +18,37 @@ app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 const DB_STATES = ['disconnected', 'connected', 'connecting', 'disconnecting'];
 
-app.get('/api/health', (req, res) => {
+const AI_KEY_CACHE_MS = 5 * 60 * 1000;
+let aiKeyCache = { valid: null, checkedAt: 0 };
+
+const checkAiKey = async () => {
+    const apiKey = (process.env.GEMINI_API_KEY || '').trim();
+    if (!apiKey) return false;
+    if (aiKeyCache.checkedAt && Date.now() - aiKeyCache.checkedAt < AI_KEY_CACHE_MS) {
+        return aiKeyCache.valid;
+    }
+    try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 4000);
+        const response = await fetch(
+            'https://generativelanguage.googleapis.com/v1beta/models?key=' + encodeURIComponent(apiKey),
+            { signal: controller.signal }
+        );
+        clearTimeout(timer);
+        aiKeyCache = { valid: response.ok, checkedAt: Date.now() };
+    } catch (err) {
+        aiKeyCache = { valid: false, checkedAt: Date.now() };
+    }
+    return aiKeyCache.valid;
+};
+
+app.get('/api/health', async (req, res) => {
+    const aiKeyValid = await checkAiKey();
     res.json({
         status: 'ok',
         database: DB_STATES[mongoose.connection.readyState] || 'unknown',
         aiConfigured: Boolean((process.env.GEMINI_API_KEY || '').trim()),
+        aiKeyValid,
         uptimeSeconds: Math.round(process.uptime()),
         timestamp: new Date().toISOString()
     });
