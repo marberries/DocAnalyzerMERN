@@ -1,75 +1,60 @@
-# DocAnalyzer — Server
+# DocAnalyzer
 
-Express 5 + MongoDB API for the DocAnalyzer document analysis application.
-The React client lives in a separate repository (`DocAnalyzerClient`).
+Intelligent Document Parsing and Metadata Registry — a MERN application that uploads documents (PDF, DOCX, TXT, MD, CSV, JSON, PNG/JPG), extracts text, analyzes it with Google Gemini (with local fallback), and stores a searchable registry in MongoDB.
 
-## What it does
+Course: Web Applications Programming
+Student: Bauyrzhan Marat
 
-- Accepts PDF, DOCX, TXT, MD, CSV, JSON and images (PNG/JPG) via multer.
-- Extracts text with `pdf-parse` (PDF), `mammoth` (DOCX) and the filesystem (plain text).
-- Sends the text to Google Gemini and stores a summary, category, keywords and
-  key findings. Images are sent to Gemini as multimodal input for OCR.
-- Falls back to a local extractive summary and term-frequency keywords when the
-  Gemini API is unavailable, so an upload never fails because of the model.
-- Stores documents, analysis results and file paths in MongoDB Atlas.
+## Stack
 
-## Requirements
+- Frontend: React 19, Create React App, Axios
+- Backend: Node.js 20+, Express 5
+- Database: MongoDB Atlas + Mongoose
+- Uploads: multer
+- Extraction: pdf-parse, mammoth, Gemini multimodal for images
+- AI: @google/genai (Gemini Flash)
 
-- Node.js 20 or newer
-- MongoDB Atlas cluster
-- Google AI Studio (Gemini) API key
+## Local setup
 
-## Setup
+### 1. Backend
 
-```bash
-cp .env.example .env      # fill in the values
-npm install
-npm run dev               # nodemon on http://localhost:5001
-# or: npm start
-```
+    cd DocAnalyzerMERN
+    npm install
+    cp .env.example .env
+    # edit .env: set MONGO_URI and GEMINI_API_KEY
+    npm run dev          # http://localhost:5001
+
+### 2. Frontend
+
+    cd DocAnalyzerClient
+    npm install
+    npm start            # http://localhost:3000
+
+Client forwards /api and /uploads to :5001 via src/setupProxy.js.
 
 ## Environment variables
 
-| Variable | Description |
-| --- | --- |
-| `PORT` | API port, default `5001` |
-| `MONGO_URI` | MongoDB Atlas connection string (database `docanalyzer`) |
-| `JWT_SECRET` | Reserved for future authentication; not used yet |
-| `GEMINI_API_KEY` | Google AI Studio key for the Gemini API |
+See `.env.example`. Required:
+
+- `MONGO_URI` — MongoDB Atlas connection string
+- `GEMINI_API_KEY` — Google AI Studio API key
+
+Optional: `PORT` (default 5001), `JWT_SECRET` (reserved).
 
 ## API
 
-| Method | Path | Description |
-| --- | --- | --- |
-| GET | `/` | Health message |
-| GET | `/api/health` | Service and database status (JSON) |
-| POST | `/api/singleFile` | Upload and analyse one document (`file` field) |
-| POST | `/api/multipleFiles` | Upload and analyse a batch (`files` fields, `title`) |
-| POST | `/api/reanalyze/:id` | Re-run AI analysis for a stored document |
-| GET | `/api/getSingleFiles` | List documents, newest first |
-| GET | `/api/getMultipleFiles` | List batch collections |
-| DELETE | `/api/:id` | Delete a document record and its stored file |
-| GET | `/uploads/:filename` | Download/open the original file |
+| Method | Path | Purpose |
+|--------|------|---------|
+| POST | /api/singleFile | Upload and analyze one document |
+| POST | /api/multipleFiles | Upload and analyze a batch |
+| POST | /api/reanalyze/:id | Re-run analysis for a stored document |
+| GET | /api/getSingleFiles | List single documents |
+| GET | /api/getMultipleFiles | List batches |
+| DELETE | /api/:id | Delete document and its file |
+| GET | /uploads/:filename | Download original |
 
 ## Notes
 
-- Upload limits: 25 MB per file, 20 files per batch.
-- The Gemini free tier allows about 20 requests per day per model, so the server
-  walks a short list of current models (`gemini-3.5-flash-lite` first), caches the
-  model that worked and puts exhausted models on cooldown. If no model answers
-  within the timeout, the document is stored with a local summary and
-  `aiAnalyzed: false`.
-- If Atlas refuses the connection, add your current public IP under
-  **Atlas → Network Access** (or use `0.0.0.0/0` for a short demo).
-- Original files are stored in `uploads/` and are not committed to git.
-
-## Troubleshooting
-
-- **`buffering timed out` or a database error on upload** — MongoDB Atlas is not
-  reachable. Check `GET /api/health`; `database` must be `connected`. Add your
-  current public IP under **Atlas → Network Access**.
-- **`aiAnalyzed: false` in the response** — Gemini was unavailable or the free-tier
-  quota (about 20 requests per day per model) is exhausted. The document is still
-  stored with a local summary; retry later with "Re-analyze with AI".
-- **`Backend Offline` in the React client** — the API is not running on port 5001,
-  or the dev proxy in the client cannot reach it.
+- Original files are stored in `server/uploads/`. MongoDB keeps only metadata and analysis results.
+- If Gemini is unavailable, the server falls back to local heuristics (summary, keywords, category) and marks the record with `aiAnalyzed=false`.
+- `.env` is git-ignored. Never commit real keys.
